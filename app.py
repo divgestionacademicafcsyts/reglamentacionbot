@@ -1,71 +1,53 @@
-# app.py
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
+from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import tempfile
 import os
 
 st.set_page_config(page_title="ReglamentoBot - UNMdP", layout="wide")
 st.title("🔍 ReglamentoBot - UNMdP")
-st.caption("Asistente de normativa administrativa – Sube tus PDFs y haz preguntas")
+st.caption("Sube tus PDFs de normativa y haz preguntas. Solo se usa lo que subas.")
 
-# Inicializar estado de sesión
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
-if "docs_loaded" not in st.session_state:
-    st.session_state.docs_loaded = False
 
-# Subida de archivos
-uploaded_files = st.file_uploader(
-    "Sube tus documentos de reglamentación (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Sube tus documentos (PDF)", type=["pdf"], accept_multiple_files=True)
 
-if uploaded_files and not st.session_state.docs_loaded:
+if uploaded_files:
     with st.spinner("Procesando documentos..."):
-        docs = []
-        for uploaded_file in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                tmp_path = tmp_file.name
-            loader = PyPDFLoader(tmp_path)
-            docs.extend(loader.load())
-            os.unlink(tmp_path)
+        texts = []
+        for f in uploaded_files:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(f.read())
+                reader = PdfReader(tmp.name)
+                text = "".join(page.extract_text() or "" for page in reader.pages)
+                texts.append(text)
+                os.unlink(tmp.name)
 
-        if docs:
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-            splits = text_splitter.split_documents(docs)
+        # Dividir en fragmentos
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+        chunks = splitter.split_text("\n\n".join(texts))
 
-            embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-                model_kwargs={'device': 'cpu'}
-            )
-            vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-            
+        # Crear embeddings ligeros
+        try:
+            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            vectorstore = FAISS.from_texts(chunks, embeddings)
             st.session_state.vectorstore = vectorstore
-            st.session_state.docs_loaded = True
-            st.success(f"✅ {len(uploaded_files)} documento(s) cargado(s) y listo(s) para consultas.")
+            st.success("✅ Documentos cargados y listos para consultas.")
+        except Exception as e:
+            st.error(f"Error al crear la base: {e}")
+            st.session_state.vectorstore = None
 
-if not st.session_state.docs_loaded:
-    st.info("Por favor, sube al menos un PDF para comenzar.")
-    st.stop()
-
-# Campo de pregunta
-pregunta = st.text_input("🔍 Haz una pregunta sobre la reglamentación:")
-if pregunta:
-    with st.spinner("Buscando en la normativa..."):
-        retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3})
-        resultados = retriever.invoke(pregunta)
-        
-        if resultados:
-            st.subheader("📄 Fragmentos relevantes:")
-            for i, doc in enumerate(resultados):
-                st.markdown(f"**Fragmento {i+1}**")
-                st.text(doc.page_content)
-                st.caption(f"Fuente: Archivo subido")
-                st.divider()
-        else:
-            st.warning("No se encontraron fragmentos relevantes en los documentos cargados.")
+# Pregunta
+pregunta = st.text_input("Haz una pregunta sobre la reglamentación:")
+if pregunta and st.session_state.vectorstore:
+    with st.spinner("Buscando..."):
+        docs = st.session_state.vectorstore.similarity_search(pregunta, k=3)
+        for i, doc in enumerate(docs):
+            st.markdown(f"**Fragmento {i+1}**")
+            st.text(doc.page_content[:1000] + ("..." if len(doc.page_content) > 1000 else ""))
+            st.divider()
+elif pregunta and not st.session_state.vectorstore:
+    st.warning("Primero sube al menos un PDF.")
