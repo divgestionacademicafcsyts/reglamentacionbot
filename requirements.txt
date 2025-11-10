@@ -1,0 +1,8 @@
+streamlit
+langchain==0.2.12
+langchain-community==0.2.12
+chromadb==0.4.24
+sentence-transformers==2.7.0
+PyPDF2==3.0.1
+torch==2.1.0
+transformers==4.35.0
